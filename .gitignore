@@ -1,0 +1,24 @@
+# ============================================================
+# shopify-system/.gitignore
+# Depot Git n1 - systeme freelance. AUCUNE donnee client ici.
+# ============================================================
+
+# --- Secrets : jamais versionnes, jamais d'exception ---
+.env
+.env.*
+!.env.example
+
+# --- Dependances ---
+node_modules/
+
+# --- Outils Shopify ---
+.shopify/
+
+# --- Systeme ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Journaux ---
+*.log
+npm-debug.log*
