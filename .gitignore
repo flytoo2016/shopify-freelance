@@ -25,5 +25,7 @@ npm-debug.log*
 
 # Pipeline PageSpeed
 tools/pagespeed/snapshots/
+# URLs reelles d'un client : jamais versionnees. Le .example l'est.
+tools/pagespeed/performance-urls.json
 tools/pagespeed/.env
 tools/pagespeed/node_modules/

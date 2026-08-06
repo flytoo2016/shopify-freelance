@@ -1,0 +1,7 @@
+{
+  "urls": [
+    { "label": "homepage",   "url": "https://www.exemple-client.com/" },
+    { "label": "product",    "url": "https://www.exemple-client.com/products/best-seller" },
+    { "label": "collection", "url": "https://www.exemple-client.com/collections/all" }
+  ]
+}

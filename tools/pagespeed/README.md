@@ -43,6 +43,22 @@ YYYYMMDD-HHMMSS-slug-crux.json          ← terrain (available:false si trafic i
 
 **Durée** : 30 à 60 secondes (Lighthouse fait une analyse complète).
 
+**Médiane sur plusieurs runs (recommandé pour une baseline fiable)**
+
+```bash
+node collect.js {{URL}} --runs 3
+```
+
+Lance 3 mesures PSI consécutives et calcule la médiane champ par champ. Produit en plus
+des bruts individuels un fichier `*-psi-mobile-median.json` et `*-psi-desktop-median.json`
+à utiliser directement dans `compare.js`.
+
+**Limite** : PSI peut servir des réponses depuis son cache entre deux runs rapprochés.
+3 runs ne garantissent pas 3 mesures indépendantes — ils réduisent l'effet des pics
+ponctuels sans les éliminer complètement.
+
+**Maximum** : 5 runs (`--runs 5`).
+
 **Quota** : 2 appels PSI + 1 appel CrUX par exécution.
 PSI : 25 000/jour · CrUX : 1 500/jour.
 

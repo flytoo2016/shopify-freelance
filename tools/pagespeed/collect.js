@@ -10,11 +10,24 @@
  * est conteste par un client. Le tri se fait dans normalize.js.
  *
  * Usage : node collect.js <url>
+ *         node collect.js --config <performance-urls.json>
+ *         node collect.js <url> --runs 3
+ *
+ * Le mode --config collecte plusieurs pages en une commande. Les appels
+ * restent SEQUENTIELS : les quotas PSI (25 000/jour) et CrUX (1 500/jour) sont
+ * partages par toutes les missions, le parallelisme ne ferait qu'y foncer.
+ *
+ * --runs N repete la mesure PSI N fois par strategie et ecrit EN PLUS un
+ * fichier median. Un score PSI varie de plusieurs dizaines de points d'un run
+ * a l'autre sur une meme page : une baseline sur un seul run n'est pas une
+ * mesure, c'est un tirage. Les N bruts restent ecrits individuellement, ce sont
+ * eux les pieces justificatives.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import dotenv from 'dotenv';
+import { normalizeRaw } from './normalize.js';
 
 // Le .env et snapshots/ sont resolus depuis l'emplacement du script, pas depuis
 // le cwd : le script reste appelable depuis n'importe quel dossier.
@@ -37,6 +50,10 @@ const CRUX_ENDPOINT = 'https://chromeuxreport.googleapis.com/v1/records:queryRec
 const PSI_TIMEOUT_MS = 30_000;
 const CRUX_TIMEOUT_MS = 15_000;
 const MAX_ATTEMPTS = 5;
+
+// Plafond volontaire. Au-dela, le gain de fiabilite devient marginal alors que
+// la consommation de quota, elle, reste lineaire.
+const MAX_RUNS = 5;
 
 /**
  * Transforme une URL en fragment de nom de fichier lisible et sans surprise.
@@ -61,6 +78,117 @@ function timestamp() {
     `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
     `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
   );
+}
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+/** Resout le chemin depuis le cwd, puis a defaut depuis le dossier du script. */
+function resolveInput(inputPath) {
+  const fromCwd = isAbsolute(inputPath) ? inputPath : resolve(process.cwd(), inputPath);
+  if (existsSync(fromCwd)) return fromCwd;
+
+  const fromRoot = join(ROOT, inputPath);
+  if (existsSync(fromRoot)) return fromRoot;
+
+  return null;
+}
+
+/**
+ * Separe les arguments positionnels des options --config et --runs.
+ * Parsing manuel : aucune dependance ajoutee pour deux options.
+ */
+function parseArgs(argv) {
+  const positional = [];
+  const options = { config: null, runs: null };
+  const keys = { '--config': 'config', '--runs': 'runs' };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const key = keys[argv[i]];
+
+    if (!key) {
+      positional.push(argv[i]);
+      continue;
+    }
+
+    const value = argv[i + 1];
+    if (!value || value.startsWith('--')) {
+      fail(`Option ${argv[i]} utilisee sans valeur.`);
+    }
+    options[key] = value;
+    i += 1;
+  }
+
+  return { positional, ...options };
+}
+
+/** Valide --runs. Absent → 1, soit le comportement historique. */
+function parseRuns(value) {
+  if (value === null) return 1;
+
+  const runs = Number(value);
+
+  if (!Number.isInteger(runs) || runs < 1 || runs > MAX_RUNS) {
+    fail(
+      `--runs attend un entier entre 1 et ${MAX_RUNS} (recu : ${value}).\n` +
+        'Quota PSI : 25 000 requetes/jour.'
+    );
+  }
+
+  return runs;
+}
+
+/**
+ * Lit le fichier de configuration multi-URL et retourne [{ label, url }, …].
+ *
+ * La validation est stricte et prealable a tout appel reseau : un config
+ * a moitie valide consommerait du quota avant d'echouer sur la 3e entree.
+ */
+function loadConfig(configArg) {
+  const configPath = resolveInput(configArg);
+
+  if (!configPath) {
+    fail(
+      `Fichier de configuration introuvable : ${configArg}\n` +
+        'Copie performance-urls.json.example en performance-urls.json.'
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch (error) {
+    fail(`JSON invalide dans ${configArg} : ${error.message}`);
+  }
+
+  const entries = parsed?.urls;
+
+  if (!Array.isArray(entries) || entries.length === 0) {
+    fail(
+      `Configuration invalide : ${configArg}\n` +
+        'Attendu un objet { "urls": [ { "label": "...", "url": "..." }, … ] } ' +
+        'avec au moins une entree.'
+    );
+  }
+
+  const isText = (value) => typeof value === 'string' && value.trim() !== '';
+
+  entries.forEach((entry, index) => {
+    if (!isText(entry?.label) || !isText(entry?.url)) {
+      fail(
+        `Configuration invalide : ${configArg}\n` +
+          `Entree ${index + 1} : "label" et "url" sont obligatoires et doivent ` +
+          'etre des chaines non vides.'
+      );
+    }
+  });
+
+  return entries.map((entry) => ({
+    label: entry.label.trim(),
+    url: entry.url.trim(),
+  }));
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -214,53 +342,259 @@ async function fetchCrUX(url) {
 /**
  * Ecrit un JSON dans snapshots/ et retourne le chemin du fichier.
  * Le dossier est cree si absent : il est gitignore, donc absent apres un clone.
+ *
+ * Quand un label est fourni (mode --config), il remplace le slug de l'URL :
+ * "homepage" est plus lisible dans un dossier de mission que le slug complet
+ * de l'URL. Il passe par slugify() malgre tout, sans quoi un label contenant
+ * "/" ecrirait hors de snapshots/.
  */
-function saveSnapshot(data, url, prefix) {
+function saveSnapshot(data, url, prefix, label = null) {
   mkdirSync(SNAPSHOTS_DIR, { recursive: true });
-  const filename = `${timestamp()}-${slugify(url)}-${prefix}.json`;
+  const name = label ? slugify(label) : slugify(url);
+  const filename = `${timestamp()}-${name}-${prefix}.json`;
   const filepath = join(SNAPSHOTS_DIR, filename);
   writeFileSync(filepath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
   return filepath;
 }
 
+// --- Mediane --------------------------------------------------------------
+
+const isNum = (value) => typeof value === 'number' && Number.isFinite(value);
+
+/** Entier le plus proche. Arrondi par defaut de la mediane. */
+const roundInt = (value) => Math.round(value);
+
+/**
+ * 4 decimales, comme toCls() dans normalize.js. Math.round() ecraserait a 0
+ * un CLS median de 0,05 et ferait ecrire "CLS : 0" dans un rapport client.
+ */
+const roundCls = (value) => parseFloat(value.toFixed(4));
+
+/**
+ * Mediane d'un tableau de valeurs mesurees.
+ *
+ * Les null sont exclus : une metrique absente d'un run ne doit pas tirer la
+ * mediane vers le bas. Tout-null ou tableau vide → null, jamais 0.
+ * N impair → valeur centrale, telle que mesuree. N pair → moyenne des deux
+ * centrales, arrondie par `refine` selon la nature du champ.
+ */
+function median(values, refine = roundInt) {
+  const numbers = values.filter(isNum).sort((a, b) => a - b);
+
+  if (numbers.length === 0) return null;
+
+  const mid = Math.floor(numbers.length / 2);
+
+  if (numbers.length % 2 === 1) return numbers[mid];
+
+  return refine((numbers[mid - 1] + numbers[mid]) / 2);
+}
+
+/**
+ * N snapshots normalises d'une meme strategie → un snapshot median.
+ *
+ * Chaque champ est median independamment : c'est une synthese statistique,
+ * pas le run "le plus representatif". meta est repris du premier run et
+ * sourceFiles liste les bruts, pour que chaque chiffre reste remontable.
+ */
+function buildMedian(snapshots, sourceFiles) {
+  const first = snapshots[0];
+  const at = (group, field, refine) =>
+    median(snapshots.map((s) => s?.[group]?.[field] ?? null), refine);
+
+  return {
+    meta: {
+      url: first?.meta?.url ?? null,
+      slug: first?.meta?.slug ?? null,
+      strategy: first?.meta?.strategy ?? null,
+      collectedAt: first?.meta?.collectedAt ?? null,
+      lighthouseVersion: first?.meta?.lighthouseVersion ?? null,
+      source: 'psi-median',
+      runs: snapshots.length,
+      sourceFiles,
+    },
+    scores: {
+      performance: at('scores', 'performance'),
+      accessibility: at('scores', 'accessibility'),
+      best_practices: at('scores', 'best_practices'),
+      seo: at('scores', 'seo'),
+    },
+    vitals: {
+      lcp_ms: at('vitals', 'lcp_ms'),
+      tbt_ms: at('vitals', 'tbt_ms'),
+      cls: at('vitals', 'cls', roundCls),
+      fcp_ms: at('vitals', 'fcp_ms'),
+      tti_ms: at('vitals', 'tti_ms'),
+    },
+    assets: {
+      total_bytes: at('assets', 'total_bytes'),
+      requests: at('assets', 'requests'),
+    },
+  };
+}
+
+/** Tableau des scores bruts, puis la mediane. "—" pour une valeur non mesuree. */
+function printRuns(strategy, snapshots, medianSnapshot) {
+  const show = (value) => (isNum(value) ? value : '—');
+
+  snapshots.forEach((snapshot, index) => {
+    console.log(
+      `  ${strategy} run ${index + 1}/${snapshots.length} : performance ` +
+        `${show(snapshot?.scores?.performance)}`
+    );
+  });
+
+  console.log(
+    `  mediane ${strategy} : performance ${show(medianSnapshot?.scores?.performance)}`
+  );
+}
+
+/**
+ * Collecte complete d'une URL : PSI mobile, PSI desktop, CrUX.
+ *
+ * N'interrompt jamais le processus : retourne { ok: false, error } pour que le
+ * mode multi-URL puisse continuer avec les pages suivantes. C'est l'appelant
+ * qui decide du sort d'un echec.
+ */
+async function collectOne({ url, label = null, runs = 1 }) {
+  const suffix = label ? ` [${label}]` : '';
+  // Le slug suit le nom de fichier : label en mode --config, URL demandee
+  // sinon. Voir normalize.js, meme regle.
+  const slugSource = label ?? url;
+
+  try {
+    console.log(`Collecte PSI (laboratoire) : ${url}${suffix}`);
+
+    const rawPaths = [];
+    const medianPaths = [];
+
+    for (const strategy of ['mobile', 'desktop']) {
+      const snapshots = [];
+      const sourceFiles = [];
+
+      for (let run = 1; run <= runs; run += 1) {
+        console.log(runs > 1 ? `  ${strategy} ${run}/${runs}…` : `  ${strategy}…`);
+
+        const raw = await fetchPSI(url, strategy);
+
+        // Le numero de run entre dans le nom des que la mesure est repetee :
+        // timestamp() ne descend pas sous la seconde, et deux reponses PSI
+        // peuvent arriver dans la meme seconde quand la seconde est servie
+        // depuis le cache de Google. Sans ce suffixe, le run suivant ecrase le
+        // precedent — un brut ecrase est une piece justificative perdue.
+        const prefix = runs > 1 ? `psi-${strategy}-run${run}` : `psi-${strategy}`;
+        const rawPath = saveSnapshot(raw, url, prefix, label);
+
+        rawPaths.push(rawPath);
+        sourceFiles.push(basename(rawPath));
+        snapshots.push(normalizeRaw(raw, slugSource));
+      }
+
+      // A un seul run il n'y a pas de mediane a calculer : le brut suffit, et
+      // normalize.js reste le chemin normal. Comportement historique intact.
+      if (runs > 1) {
+        const medianSnapshot = buildMedian(snapshots, sourceFiles);
+        printRuns(strategy, snapshots, medianSnapshot);
+        medianPaths.push(
+          saveSnapshot(medianSnapshot, url, `psi-${strategy}-median`, label)
+        );
+      }
+    }
+
+    // Source 2, terrain. Fichier separe : jamais fusionne avec le laboratoire.
+    console.log('Collecte CrUX (terrain) : PHONE…');
+    const crux = await fetchCrUX(url);
+    const cruxAvailable = crux.available !== false;
+
+    // Le fichier CrUX est TOUJOURS ecrit, y compris quand il n'y a pas de
+    // donnees : l'absence de donnees terrain est elle-meme une information
+    // datee, qui doit figurer dans le dossier de mesure.
+    const cruxPath = saveSnapshot(
+      cruxAvailable
+        ? crux
+        : { available: false, url, collectedAt: new Date().toISOString() },
+      url,
+      'crux',
+      label
+    );
+
+    console.log('\nSnapshots bruts ecrits :');
+    for (const rawPath of rawPaths) {
+      console.log(`  ${rawPath}`);
+    }
+    console.log(`  ${cruxPath}${cruxAvailable ? '' : ' (trafic insuffisant)'}`);
+
+    if (medianPaths.length > 0) {
+      console.log('\nSnapshots medians ecrits :');
+      for (const medianPath of medianPaths) {
+        console.log(`  ${medianPath}`);
+      }
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/** Mode --config : boucle sequentielle, un echec n'arrete pas les suivantes. */
+async function collectFromConfig(configArg, runs) {
+  const targets = loadConfig(configArg);
+  const failures = [];
+
+  for (const target of targets) {
+    const result = await collectOne({ ...target, runs });
+
+    if (!result.ok) {
+      failures.push(target);
+      console.error(`\nEchec [${target.label}] : ${result.error.message}`);
+    }
+
+    console.log('');
+  }
+
+  const total = targets.length;
+  const done = total - failures.length;
+  const plural = failures.length > 1 ? 's' : '';
+
+  console.log(
+    failures.length === 0
+      ? `${done}/${total} URLs collectees`
+      : `${done}/${total} URLs collectees (${failures.length} erreur${plural})`
+  );
+
+  if (failures.length > 0) {
+    console.error(`Non collectees : ${failures.map((t) => t.label).join(', ')}`);
+    process.exitCode = 1;
+  }
+}
+
 async function main() {
-  const url = process.argv[2];
+  const { positional, config, runs: runsArg } = parseArgs(process.argv.slice(2));
+  const runs = parseRuns(runsArg);
+
+  if (config) {
+    await collectFromConfig(config, runs);
+    return;
+  }
+
+  const url = positional[0];
 
   if (!url) {
-    console.error('Usage: node collect.js <url>');
+    console.error(
+      'Usage: node collect.js <url>\n' +
+        '       node collect.js --config <performance-urls.json>\n' +
+        `       node collect.js <url> --runs <1-${MAX_RUNS}>`
+    );
     process.exit(1);
   }
 
-  console.log(`Collecte PSI (laboratoire) : ${url}`);
+  const result = await collectOne({ url, runs });
 
-  console.log('  mobile…');
-  const mobile = await fetchPSI(url, 'mobile');
-  const mobilePath = saveSnapshot(mobile, url, 'psi-mobile');
-
-  console.log('  desktop…');
-  const desktop = await fetchPSI(url, 'desktop');
-  const desktopPath = saveSnapshot(desktop, url, 'psi-desktop');
-
-  // Source 2, terrain. Fichier separe : jamais fusionne avec le laboratoire.
-  console.log('Collecte CrUX (terrain) : PHONE…');
-  const crux = await fetchCrUX(url);
-  const cruxAvailable = crux.available !== false;
-
-  // Le fichier CrUX est TOUJOURS ecrit, y compris quand il n'y a pas de
-  // donnees : l'absence de donnees terrain est elle-meme une information
-  // datee, qui doit figurer dans le dossier de mesure.
-  const cruxPath = saveSnapshot(
-    cruxAvailable
-      ? crux
-      : { available: false, url, collectedAt: new Date().toISOString() },
-    url,
-    'crux'
-  );
-
-  console.log('\nSnapshots bruts ecrits :');
-  console.log(`  ${mobilePath}`);
-  console.log(`  ${desktopPath}`);
-  console.log(`  ${cruxPath}${cruxAvailable ? '' : ' (trafic insuffisant)'}`);
+  // Mode URL unique : l'echec reste fatal, comme avant.
+  if (!result.ok) {
+    throw result.error;
+  }
 }
 
 main().catch((error) => {
