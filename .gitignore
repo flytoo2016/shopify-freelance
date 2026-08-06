@@ -22,3 +22,8 @@ desktop.ini
 # --- Journaux ---
 *.log
 npm-debug.log*
+
+# Pipeline PageSpeed
+tools/pagespeed/snapshots/
+tools/pagespeed/.env
+tools/pagespeed/node_modules/
