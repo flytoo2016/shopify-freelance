@@ -126,8 +126,8 @@ Les données lab et terrain **ne se comparent pas directement**.
 
 CrUX est absent (`available:false`) si le trafic Chrome est insuffisant.
 
-Les données terrain CrUX se mettent à jour une fois par jour vers 04:00 UTC — appeler
-l'API plusieurs fois le même jour retourne le même résultat.
+Les données terrain CrUX se mettent à jour une fois par jour — appeler l'API plusieurs
+fois le même jour retourne le même résultat.
 
 ## Sécurité
 
