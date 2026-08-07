@@ -29,3 +29,5 @@ tools/pagespeed/snapshots/
 tools/pagespeed/performance-urls.json
 tools/pagespeed/.env
 tools/pagespeed/node_modules/
+# Anciennes versions conservees en local, non versionnees
+tools/pagespeed/archive/
