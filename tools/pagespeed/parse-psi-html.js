@@ -17,12 +17,16 @@
  *   la page PSI charge les deux rapports de façon asynchrone.
  *
  * USAGE :
- *   node parse-psi-html.js <fichier.html> [--out <dossier>]
+ *   node parse-psi-html.js <fichier.html> [--out <dossier>] [--label <label>]
+ *
+ * --label distingue plusieurs pages d'un même site (homepage, collection,
+ * product…). Sans --label, le comportement est celui d'avant : seul le slug
+ * de l'URL nomme les fichiers.
  *
  * PRODUIT dans le dossier de sortie :
- *   <slug>-psi-lab-<stratégie>-<ts>.json     ← métriques Lighthouse
- *   <slug>-crux-url-<stratégie>-<ts>.json    ← données terrain CrUX (URL)
- *   <slug>-crux-origin-<stratégie>-<ts>.json ← données terrain CrUX (Origine)
+ *   <slug>[-label]-psi-lab-<stratégie>-<ts>.json     ← métriques Lighthouse
+ *   <slug>[-label]-crux-url-<stratégie>-<ts>.json    ← données terrain CrUX (URL)
+ *   <slug>[-label]-crux-origin-<stratégie>-<ts>.json ← données terrain CrUX (Origine)
  *
  * Le CrUX est spécifique au form factor : les valeurs mobile et desktop
  * diffèrent, d'où le suffixe de stratégie sur ces fichiers aussi.
@@ -319,7 +323,7 @@ function extractCrux(html) {
 function main() {
   const args = process.argv.slice(2);
   if (!args.length) {
-    fail('Usage: node parse-psi-html.js <fichier.html> [--out <dossier>]');
+    fail('Usage: node parse-psi-html.js <fichier.html> [--out <dossier>] [--label <label>]');
   }
 
   const htmlArg = args[0];
@@ -327,6 +331,12 @@ function main() {
   const outDir  = outIdx !== -1 && args[outIdx + 1]
     ? resolve(process.cwd(), args[outIdx + 1])
     : dirname(resolve(process.cwd(), htmlArg));
+
+  // Label de page facultatif — normalisé pour un nom de fichier sûr
+  const labelIdx  = args.indexOf('--label');
+  const pageLabel = labelIdx !== -1 && args[labelIdx + 1]
+    ? args[labelIdx + 1].toLowerCase().replace(/[^a-z0-9-]/g, '-')
+    : null;
 
   const htmlPath = isAbsolute(htmlArg) ? htmlArg : resolve(process.cwd(), htmlArg);
   if (!existsSync(htmlPath)) fail(`Fichier introuvable : ${htmlPath}`);
@@ -353,6 +363,8 @@ function main() {
 
   const stratSuffix = strategy ?? 'unknown';
   const slug = slugify(analyzedUrl) || 'unknown';
+  // Slug des fichiers de sortie : le label distingue deux pages du même site
+  const outSlug = pageLabel ? `${slug}-${pageLabel}` : slug;
 
   // Timestamp des noms de sortie : nom du fichier > date du rapport HTML > date du jour
   const ts = tsInfo?.ts
@@ -419,9 +431,9 @@ function main() {
 
   // Suffixe stratégie + timestamp : aucun run n'écrase le précédent
   // CrUX aussi suffixé par la stratégie : le terrain diffère par form factor
-  const labFile      = join(outDir, `${slug}-psi-lab-${stratSuffix}-${ts}.json`);
-  const cruxUrlFile  = join(outDir, `${slug}-crux-url-${stratSuffix}-${ts}.json`);
-  const cruxOrigFile = join(outDir, `${slug}-crux-origin-${stratSuffix}-${ts}.json`);
+  const labFile      = join(outDir, `${outSlug}-psi-lab-${stratSuffix}-${ts}.json`);
+  const cruxUrlFile  = join(outDir, `${outSlug}-crux-url-${stratSuffix}-${ts}.json`);
+  const cruxOrigFile = join(outDir, `${outSlug}-crux-origin-${stratSuffix}-${ts}.json`);
 
   writeFileSync(labFile, JSON.stringify(labSnapshot, null, 2) + '\n');
   writeFileSync(cruxUrlFile,  JSON.stringify(cruxUrlSnapshot,    null, 2) + '\n');
@@ -438,6 +450,7 @@ function main() {
   console.log(`  Fichier source : ${basename(htmlPath)}`);
   console.log(`  Timestamp      : ${tsInfo ? `${tsInfo.ts} (${tsInfo.date} ${tsInfo.time})` : 'non détecté'}`);
   console.log(`  URL       : ${analyzedUrl}`);
+  console.log(`  Page label : ${pageLabel ?? '(non renseigné — slug URL utilisé)'}`);
   console.log(`  Stratégie : ${strategy ?? '⚠️  non détectée'}`);
   console.log(`  Appareil  : ${deviceName ?? '—'}`);
   console.log(`  Date      : ${reportDate}`);
