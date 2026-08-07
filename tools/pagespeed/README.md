@@ -1,7 +1,8 @@
 # Shopify PageSpeed Pipeline
 
 Mesure de performance reproductible pour missions Shopify freelance.
-Trois scripts, une tâche chacun : collecter, normaliser, comparer.
+Un script, une tâche : collecter, normaliser, comparer — plus deux scripts de
+secours pour les sites qui bloquent l'API PSI (parser HTML, médiane).
 
 ## Prérequis
 
@@ -19,7 +20,7 @@ npm install
 
 ---
 
-## Les trois scripts
+## Les scripts
 
 ### 1. `collect.js` — collecter les données brutes
 
@@ -110,6 +111,103 @@ terrain.
 
 **Règle** : comparer deux snapshots de la même URL et de la même stratégie. Le script
 avertit si les stratégies ou les URLs diffèrent.
+
+### 4. `parse-psi-html.js` — sites qui bloquent l'API PSI
+
+Quand `collect.js` retourne un timeout, utiliser ce workflow manuel.
+
+**Convention de nommage obligatoire :**
+
+```
+{slug}-{stratégie}-{YYYYMMDD-HHMM}.html
+
+exemple-mobile-20260807-0954.html
+exemple-desktop-20260807-0953.html
+```
+
+Le parser lit la stratégie et le timestamp depuis le nom de fichier — le DOM charge les
+deux rapports de façon asynchrone et n'est pas fiable pour ça. Un nom non conforme
+produit `stratégie: null` et des fichiers `*-unknown-*.json`.
+
+**Sauvegarder la page depuis Chrome :**
+
+1. Ouvrir pagespeed.web.dev, entrer l'URL, attendre les résultats complets
+2. `F12 → Console → copy(document.documentElement.outerHTML)`
+3. Coller dans un fichier `.html` selon la convention ci-dessus
+4. Basculer Mobile ↔ Bureau, recommencer pour l'autre stratégie
+
+**Parser :**
+
+```bash
+node parse-psi-html.js snapshots\exemple-mobile-20260807-0954.html --out snapshots\
+node parse-psi-html.js snapshots\exemple-desktop-20260807-0953.html --out snapshots\
+```
+
+**Produit 3 fichiers JSON par capture**, soit 6 pour les deux stratégies :
+
+```
+exemple-com-psi-lab-mobile-20260807-0954.json
+exemple-com-crux-url-mobile-20260807-0954.json
+exemple-com-crux-origin-mobile-20260807-0954.json
+
+exemple-com-psi-lab-desktop-20260807-0953.json
+exemple-com-crux-url-desktop-20260807-0953.json
+exemple-com-crux-origin-desktop-20260807-0953.json
+```
+
+Une page PSI sauvegardée après bascule d'onglet contient **les deux** stratégies : le
+parser isole le panneau demandé (rapport Lighthouse **et** bloc CrUX). Le CrUX est
+spécifique au form factor — d'où le suffixe de stratégie sur ces fichiers aussi.
+
+Les fichiers `*-psi-lab-*.json` se donnent directement à `compare.js` (structure
+`meta` / `scores` / `vitals` identique à une sortie de `normalize.js`). Deux réserves :
+**TTI**, **poids total** et **nombre de requêtes** ne sont pas extractibles du HTML et
+ressortiront à `—` dans le rapport, tout comme la date de collecte.
+
+**Note sur la variance PSI.** Un seul run n'est pas fiable pour un livrable client — le
+LCP peut varier de ±50 % entre deux runs sans aucune modification du site. Faire 3 runs
+et calculer la médiane avec `median-html.js`.
+
+### 5. `median-html.js` — médiane sur N runs HTML
+
+```bash
+node median-html.js snapshots\exemple-com-psi-lab-mobile-*.json
+```
+
+Ou en listant les fichiers explicitement :
+
+```bash
+node median-html.js \
+  snapshots\exemple-com-psi-lab-mobile-20260807-0954.json \
+  snapshots\exemple-com-psi-lab-mobile-20260807-1230.json \
+  snapshots\exemple-com-psi-lab-mobile-20260807-1800.json
+```
+
+Produit :
+
+```
+exemple-com-psi-lab-mobile-median.json
+```
+
+Minimum 2 fichiers requis. Stratégie déduite du premier fichier. Affiche les valeurs
+brutes de chaque run avant la médiane.
+
+### Workflow complet pour un site qui bloque l'API
+
+```bash
+# 3 runs mobile (espacés dans le temps)
+node parse-psi-html.js snapshots\exemple-mobile-{ts1}.html --out snapshots\
+node parse-psi-html.js snapshots\exemple-mobile-{ts2}.html --out snapshots\
+node parse-psi-html.js snapshots\exemple-mobile-{ts3}.html --out snapshots\
+
+# Médiane
+node median-html.js snapshots\exemple-com-psi-lab-mobile-*.json
+
+# Même chose pour desktop
+# Rapport avant/après
+node compare.js snapshots\exemple-com-psi-lab-mobile-median.json \
+                snapshots\exemple-com-psi-lab-mobile-median-APRES.json
+```
 
 ---
 
