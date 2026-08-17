@@ -192,6 +192,18 @@ exemple-com-psi-lab-mobile-median.json
 Minimum 2 fichiers requis. Stratégie déduite du premier fichier. Affiche les valeurs
 brutes de chaque run avant la médiane.
 
+**Option `--name <préfixe>`** — force le préfixe du fichier de sortie :
+
+```bash
+node median-html.js snapshots\exemple-com-homepage-psi-lab-mobile-*.json --name exemple-homepage
+# → exemple-homepage-psi-lab-mobile-median.json
+```
+
+Nécessaire dès que plusieurs pages d'un même site sont mesurées. Le nom de sortie par
+défaut est construit sur le slug du **domaine**, qui ignore le `--label` passé à
+`parse-psi-html.js` : sans `--name`, les médianes de la home et d'une collection
+s'écriraient dans le même fichier. Sans l'option, le comportement est inchangé.
+
 ### Workflow complet pour un site qui bloque l'API
 
 ```bash

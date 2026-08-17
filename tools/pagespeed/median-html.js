@@ -8,11 +8,22 @@
  * USAGE :
  *   node median-html.js <fichier1.json> <fichier2.json> [<fichier3.json> ...]
  *   node median-html.js snapshots/<slug>-psi-lab-mobile-*.json
+ *   node median-html.js snapshots/<slug>-homepage-psi-lab-mobile-*.json --name monsite-homepage
  *
  * Le motif * est développé par le script : PowerShell ne le fait pas.
  *
  * PRODUIT, dans le dossier des fichiers d'entrée :
  *   <slug>-psi-lab-<stratégie>-median.json
+ *   ou <préfixe>-psi-lab-<stratégie>-median.json avec --name <préfixe>
+ *
+ * RUNS VIDES : un snapshot sans aucune valeur numérique (capture HTML prise
+ * avant l'affichage du rapport Lighthouse) est signalé, exclu du calcul, et ne
+ * compte pas dans meta.runs. Il est listé dans meta.excludedFiles.
+ *
+ * POURQUOI --name : le slug d'un snapshot est celui du domaine. Quand plusieurs
+ * pages d'un même site sont parsées avec --label (homepage, collection…), leurs
+ * médianes s'écraseraient toutes sur le même nom de fichier. --name force le
+ * préfixe de sortie. Sans l'option, le comportement est inchangé.
  *
  * Aucune dépendance externe. Node.js natif uniquement.
  */
@@ -86,6 +97,50 @@ function median(values, { float = false } = {}) {
   return float ? parseFloat(raw.toFixed(4)) : Math.round(raw);
 }
 
+/**
+ * Un run est exploitable s'il porte au moins une valeur numérique, score ou
+ * métrique. Un snapshot entièrement null vient d'une capture HTML sans rapport
+ * Lighthouse (page enregistrée avant l'affichage des résultats) : il n'apporte
+ * aucune mesure et ne doit pas compter comme un run.
+ *
+ * Zéro est une valeur : un CLS mesuré à 0 rend le run exploitable.
+ */
+function isUsable(snapshot) {
+  return [
+    ...SCORE_KEYS.map((k) => snapshot?.scores?.[k]),
+    ...VITAL_KEYS.map((k) => snapshot?.vitals?.[k]),
+  ].some((v) => typeof v === 'number' && Number.isFinite(v));
+}
+
+/**
+ * Sépare les options de la liste de fichiers.
+ * Seule option reconnue : --name <préfixe> (ou --name=<préfixe>).
+ */
+function parseArgs(argv) {
+  const files = [];
+  let name = null;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+
+    if (arg === '--name') {
+      const value = argv[i + 1];
+      if (!value || value.startsWith('--')) {
+        fail('--name attend un préfixe. Exemple : --name exemple-homepage');
+      }
+      name = value;
+      i += 1;
+    } else if (arg.startsWith('--name=')) {
+      name = arg.slice('--name='.length);
+      if (!name) fail('--name attend un préfixe. Exemple : --name=exemple-homepage');
+    } else {
+      files.push(arg);
+    }
+  }
+
+  return { files, name };
+}
+
 /** Horodatage lu dans le nom du fichier, pour l'affichage des runs. */
 function runLabel(file) {
   const m = basename(file).match(/(\d{8}-\d{4})/);
@@ -127,17 +182,42 @@ function loadSnapshot(arg) {
 // ---------------------------------------------------------------------------
 
 function main() {
-  const args = process.argv.slice(2).flatMap(expandGlob);
+  const { files, name } = parseArgs(process.argv.slice(2));
+  const args = files.flatMap(expandGlob);
 
   if (args.length < 2) {
     fail(
       'Au moins 2 fichiers sont nécessaires pour une médiane.\n' +
-        '  Usage : node median-html.js <fichier1.json> <fichier2.json> [...]'
+        '  Usage : node median-html.js <fichier1.json> <fichier2.json> [...] [--name <préfixe>]'
     );
   }
 
-  const loaded = args.map(loadSnapshot);
-  const snapshots = loaded.map((l) => l.snapshot);
+  const loaded = args.map(loadSnapshot).map((l) => ({ ...l, usable: isUsable(l.snapshot) }));
+
+  // Les runs vides sont signalés puis écartés : ils ne comptent pas dans
+  // meta.runs et ne servent pas de référence pour les métadonnées.
+  loaded.forEach((l, i) => {
+    if (!l.usable) {
+      console.warn(
+        `⚠️  Run ${i + 1} (${runLabel(l.path)}) : aucune valeur exploitable — exclu du calcul`
+      );
+    }
+  });
+
+  const used = loaded.filter((l) => l.usable);
+  const excluded = loaded.filter((l) => !l.usable);
+
+  if (!used.length) {
+    fail('Aucun run exploitable : tous les snapshots fournis sont vides.');
+  }
+  if (used.length < 2) {
+    console.warn(
+      `⚠️  ${used.length} run exploitable sur ${loaded.length} — ce n'est pas une médiane.`
+    );
+    console.warn('   À ne pas livrer : refaire les captures manquantes.');
+  }
+
+  const snapshots = used.map((l) => l.snapshot);
   const first = snapshots[0];
 
   // Stratégie : identique partout, ou "mixed"
@@ -165,7 +245,8 @@ function main() {
     meta: {
       source: 'psi-html-median',
       runs: snapshots.length,
-      sourceFiles: loaded.map((l) => basename(l.path)),
+      sourceFiles: used.map((l) => basename(l.path)),
+      ...(excluded.length ? { excludedFiles: excluded.map((l) => basename(l.path)) } : {}),
       url: first.meta?.url ?? null,
       slug,
       strategy,
@@ -180,25 +261,31 @@ function main() {
   };
 
   const outDir = dirname(loaded[0].path);
-  const outFile = join(outDir, `${slug}-psi-lab-${strategy}-median.json`);
+  const outFile = join(outDir, `${name ?? slug}-psi-lab-${strategy}-median.json`);
   writeFileSync(outFile, JSON.stringify(medianSnapshot, null, 2) + '\n');
 
   // Affichage : valeurs brutes de chaque run, puis médiane
   console.log('');
-  const LABEL_WIDTH = 22;
+  const LABEL_WIDTH = 30;  // tient « run N (ts) [exclu] » sans casser l'alignement
   const line = (label, sc, v) =>
     `  ${label.padEnd(LABEL_WIDTH)}: perf ${s(sc)}  ` +
     `LCP ${s(v.lcp_ms, ' ms')}  TBT ${s(v.tbt_ms, ' ms')}  CLS ${s(v.cls)}`;
 
+  // Tous les runs sont affichés, y compris les exclus : l'opérateur doit voir
+  // ce qui a été écarté, pas seulement ce qui a été retenu.
   loaded.forEach((l, i) => {
-    console.log(line(`run ${i + 1} (${runLabel(l.path)})`, l.snapshot.scores?.performance, l.snapshot.vitals ?? {}));
+    const label = `run ${i + 1} (${runLabel(l.path)})${l.usable ? '' : ' [exclu]'}`;
+    console.log(line(label, l.snapshot.scores?.performance, l.snapshot.vitals ?? {}));
   });
   console.log('  ' + '─'.repeat(62));
   console.log(line('médiane', scores.performance, vitals));
 
   console.log(`\n✅ Fichier écrit :\n  ${outFile}`);
   console.log('\n📊 Médiane complète :');
-  console.log(`  Runs      : ${snapshots.length}`);
+  const excludedNote = excluded.length
+    ? ` (${excluded.length} exclu${excluded.length > 1 ? 's' : ''} sur ${loaded.length} fourni${loaded.length > 1 ? 's' : ''})`
+    : '';
+  console.log(`  Runs      : ${snapshots.length}${excludedNote}`);
   console.log(`  Stratégie : ${strategy}`);
   console.log(`  URL       : ${first.meta?.url ?? '—'}`);
   console.log('');
