@@ -204,6 +204,12 @@ défaut est construit sur le slug du **domaine**, qui ignore le `--label` passé
 `parse-psi-html.js` : sans `--name`, les médianes de la home et d'une collection
 s'écriraient dans le même fichier. Sans l'option, le comportement est inchangé.
 
+**Les fichiers `*-median.json` sont écartés du développement des motifs.** Ce sont les
+sorties du script : sans cette exclusion, relancer deux fois la même commande
+rechargerait la médiane précédente comme un run supplémentaire. Le script signale les
+fichiers écartés. Un fichier médiane nommé explicitement, ou un motif visant les
+médianes (`*-median.json`), reste accepté.
+
 ### Workflow complet pour un site qui bloque l'API
 
 ```bash

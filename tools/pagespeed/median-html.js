@@ -38,6 +38,10 @@ const SCORE_KEYS  = ['performance', 'accessibility', 'best_practices', 'seo'];
 const VITAL_KEYS  = ['lcp_ms', 'tbt_ms', 'cls', 'fcp_ms', 'si_ms', 'tti_ms'];
 const FLOAT_KEYS  = new Set(['cls']);  // arrondi à 4 décimales, pas à l'entier
 
+// Suffixe des fichiers produits par ce script, écartés du développement des
+// motifs pour ne jamais être réingérés comme un run.
+const MEDIAN_SUFFIX = '-median.json';
+
 // ---------------------------------------------------------------------------
 // Utilitaires
 // ---------------------------------------------------------------------------
@@ -61,6 +65,12 @@ function resolveInput(arg) {
 /**
  * Développe un motif contenant * en liste de fichiers.
  * PowerShell ne développe pas les motifs : le script reçoit le * littéral.
+ *
+ * Les fichiers *-median.json sont écartés du développement : ce sont les
+ * SORTIES de ce script. Sans cette exclusion, relancer deux fois la même
+ * commande sans --name recharge la médiane précédente comme un run
+ * supplémentaire et fausse le calcul, silencieusement.
+ * Exception : si le motif vise explicitement les médianes, on ne filtre pas.
  */
 function expandGlob(arg) {
   if (!arg.includes('*')) return [arg];
@@ -74,10 +84,19 @@ function expandGlob(arg) {
     .replace(/\*/g, '.*');
   const re = new RegExp(`^${pattern}$`);
 
-  const hits = readdirSync(dirPath)
-    .filter((f) => re.test(f))
-    .sort()
-    .map((f) => join(dirPath, f));
+  const matched = readdirSync(dirPath).filter((f) => re.test(f));
+  const wantsMedians = basename(arg).endsWith(MEDIAN_SUFFIX);
+  const kept = wantsMedians ? matched : matched.filter((f) => !f.endsWith(MEDIAN_SUFFIX));
+
+  const skipped = matched.length - kept.length;
+  if (skipped) {
+    console.warn(
+      `ℹ️  ${skipped} fichier${skipped > 1 ? 's' : ''} ${MEDIAN_SUFFIX} écarté${skipped > 1 ? 's' : ''} : ` +
+        'sortie du script, pas un run.'
+    );
+  }
+
+  const hits = kept.sort().map((f) => join(dirPath, f));
 
   return hits.length ? hits : [arg];
 }
@@ -261,7 +280,7 @@ function main() {
   };
 
   const outDir = dirname(loaded[0].path);
-  const outFile = join(outDir, `${name ?? slug}-psi-lab-${strategy}-median.json`);
+  const outFile = join(outDir, `${name ?? slug}-psi-lab-${strategy}${MEDIAN_SUFFIX}`);
   writeFileSync(outFile, JSON.stringify(medianSnapshot, null, 2) + '\n');
 
   // Affichage : valeurs brutes de chaque run, puis médiane
